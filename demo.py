@@ -15,13 +15,9 @@ class CATIAV5Controller:
             print("=== CATIA V5 自动化绘图 ===")
             print("CATIA 连接成功")
 
-            # 定义四个矩形的固定长宽和初始位置
-            self.rectangles = [
-                {'width': 15, 'height': 8, 'x': 110, 'y': 110, 'angle': 0},
-                {'width': 12, 'height': 6, 'x': 85, 'y': 105, 'angle': math.pi / 4},
-                {'width': 10, 'height': 10, 'x': 100, 'y': 80, 'angle': math.pi / 6},
-                {'width': 8, 'height': 12, 'x': 115, 'y': 90, 'angle': -math.pi / 4}
-            ]
+            # 随机生成圆形和矩形，确保初始不重叠
+            self.shapes = self.generate_non_overlapping_shapes(shape_count=random.randint(3, 8))
+
             self.best_solution = None
             self.sketch = None
             self.part = None
@@ -31,6 +27,52 @@ class CATIAV5Controller:
             print(f"初始化失败: {e}")
             self._cleanup()
             raise
+
+    def generate_non_overlapping_shapes(self, shape_count=5, max_attempts=100):
+        """随机生成不重叠的圆形和矩形"""
+        shapes = []
+        attempts = 0
+
+        while len(shapes) < shape_count and attempts < max_attempts:
+            # 随机决定生成圆形还是矩形
+            if random.random() < 0.5:  # 50%概率生成圆形
+                new_shape = {
+                    'type': 'circle',
+                    'x': random.uniform(80, 120),
+                    'y': random.uniform(80, 120),
+                    'radius': random.uniform(5, 15),
+                    'fixed_size': False  # 默认不是固定大小的
+                }
+                # 第一个圆形设为插头(固定大小)
+                if not any(s['type'] == 'circle' for s in shapes):
+                    new_shape['radius'] = 10  # 固定半径
+                    new_shape['fixed_size'] = True
+            else:  # 生成矩形
+                new_shape = {
+                    'type': 'rectangle',
+                    'width': random.uniform(8, 15),
+                    'height': random.uniform(6, 12),
+                    'x': random.uniform(80, 120),
+                    'y': random.uniform(80, 120),
+                    'angle': random.uniform(-math.pi / 2, math.pi / 2),
+                    'fixed_size': False
+                }
+
+            # 检查新形状是否与现有形状重叠
+            overlaps = False
+            for existing_shape in shapes:
+                if self.check_overlap(new_shape, existing_shape):
+                    overlaps = True
+                    break
+
+            if not overlaps:
+                shapes.append(new_shape)
+            attempts += 1
+
+        if len(shapes) < shape_count:
+            print(f"警告: 只生成了 {len(shapes)} 个不重叠的形状，未能达到 {shape_count} 个")
+
+        return shapes
 
     def _cleanup(self):
         """清理资源"""
@@ -102,14 +144,15 @@ class CATIAV5Controller:
             self._cleanup()
             raise
 
-    def draw_circle(self, sketch, x=0, y=0, radius=50):
+    def draw_circle(self, sketch, x=0, y=0, radius=50, name=None):
         """绘制圆形"""
         try:
             factory = sketch.OpenEdition()
             circle = factory.CreateClosedCircle(x, y, radius)
+            if name:
+                circle.Name = name
             sketch.CloseEdition()
             self.part.Update()
-            print(f"圆形创建成功 (中心: ({x}, {y}), 半径: {radius})")
             return True
         except Exception as e:
             print(f"绘制圆形失败: {e}")
@@ -154,50 +197,59 @@ class CATIAV5Controller:
             print(f"绘制矩形失败: {e}")
             return False
 
-    def get_rectangle_corners(self, rect):
-        """获取矩形的四个角点坐标"""
-        x, y = rect['x'], rect['y']
-        half_w = rect['width'] / 2
-        half_h = rect['height'] / 2
-        angle = rect['angle']
+    def get_shape_corners(self, shape):
+        """获取形状的所有角点坐标"""
+        if shape['type'] == 'rectangle':
+            x, y = shape['x'], shape['y']
+            half_w = shape['width'] / 2
+            half_h = shape['height'] / 2
+            angle = shape['angle']
 
-        cos_a = math.cos(angle)
-        sin_a = math.sin(angle)
+            cos_a = math.cos(angle)
+            sin_a = math.sin(angle)
 
-        corners = []
-        for dx, dy in [(-half_w, -half_h), (half_w, -half_h),
-                       (half_w, half_h), (-half_w, half_h)]:
-            rot_x = x + dx * cos_a - dy * sin_a
-            rot_y = y + dx * sin_a + dy * cos_a
-            corners.append((rot_x, rot_y))
+            corners = []
+            for dx, dy in [(-half_w, -half_h), (half_w, -half_h),
+                           (half_w, half_h), (-half_w, half_h)]:
+                rot_x = x + dx * cos_a - dy * sin_a
+                rot_y = y + dx * sin_a + dy * cos_a
+                corners.append((rot_x, rot_y))
+            return corners
+        elif shape['type'] == 'circle':
+            # 对于圆形，返回圆周上的8个点作为近似
+            x, y = shape['x'], shape['y']
+            radius = shape['radius']
+            corners = []
+            for i in range(8):
+                angle = 2 * math.pi * i / 8
+                corners.append((x + radius * math.cos(angle), y + radius * math.sin(angle)))
+            return corners
 
-        return corners
-
-    def check_overlap(self, rect1, rect2):
-        """检查两个矩形是否重叠(分离轴定理)"""
+    def check_overlap(self, shape1, shape2):
+        """检查两个形状是否重叠(分离轴定理)"""
 
         def project(poly, axis):
             dots = [p[0] * axis[0] + p[1] * axis[1] for p in poly]
             return min(dots), max(dots)
 
-        corners1 = self.get_rectangle_corners(rect1)
-        corners2 = self.get_rectangle_corners(rect2)
+        corners1 = self.get_shape_corners(shape1)
+        corners2 = self.get_shape_corners(shape2)
 
-        # 检查矩形1的边
+        # 检查形状1的边
         edges = []
-        for i in range(4):
+        for i in range(len(corners1)):
             x1, y1 = corners1[i]
-            x2, y2 = corners1[(i + 1) % 4]
+            x2, y2 = corners1[(i + 1) % len(corners1)]
             edge = (x2 - x1, y2 - y1)
             length = math.sqrt(edge[0] ** 2 + edge[1] ** 2)
             if length > 0:
                 normal = (-edge[1] / length, edge[0] / length)
                 edges.append(normal)
 
-        # 检查矩形2的边
-        for i in range(4):
+        # 检查形状2的边
+        for i in range(len(corners2)):
             x1, y1 = corners2[i]
-            x2, y2 = corners2[(i + 1) % 4]
+            x2, y2 = corners2[(i + 1) % len(corners2)]
             edge = (x2 - x1, y2 - y1)
             length = math.sqrt(edge[0] ** 2 + edge[1] ** 2)
             if length > 0:
@@ -217,19 +269,19 @@ class CATIAV5Controller:
     def evaluate_solution(self, solution):
         """评估解决方案的质量"""
         circle_x, circle_y, circle_r = solution['circle']
-        rectangles = solution['rectangles']
+        shapes = solution['shapes']
 
-        # 检查矩形间是否重叠
+        # 检查形状间是否重叠
         overlap_penalty = 0
-        for i in range(len(rectangles)):
-            for j in range(i + 1, len(rectangles)):
-                if self.check_overlap(rectangles[i], rectangles[j]):
+        for i in range(len(shapes)):
+            for j in range(i + 1, len(shapes)):
+                if self.check_overlap(shapes[i], shapes[j]):
                     overlap_penalty += 1000  # 大惩罚项
 
-        # 检查所有矩形是否在圆内
+        # 检查所有形状是否在圆内
         max_distance = 0
-        for rect in rectangles:
-            corners = self.get_rectangle_corners(rect)
+        for shape in shapes:
+            corners = self.get_shape_corners(shape)
             for corner_x, corner_y in corners:
                 distance = math.sqrt((corner_x - circle_x) ** 2 + (corner_y - circle_y) ** 2)
                 if distance > max_distance:
@@ -242,33 +294,39 @@ class CATIAV5Controller:
             return float('inf')  # 无效解
 
     def simulated_annealing(self, iterations=1000, temp=1000, cooling_rate=0.99):
-        """模拟退火优化矩形位置和包围圆"""
+        """模拟退火优化形状位置和包围圆"""
         # 初始化当前解
         current_solution = {
             'circle': [100, 100, 50],  # 初始圆参数[x, y, radius]
-            'rectangles': [r.copy() for r in self.rectangles]  # 复制初始矩形
+            'shapes': [s.copy() for s in self.shapes]  # 复制初始形状
         }
 
         # 初始化最佳解
         best_solution = {
             'circle': current_solution['circle'].copy(),
-            'rectangles': [r.copy() for r in current_solution['rectangles']]
+            'shapes': [s.copy() for s in current_solution['shapes']]
         }
 
         for i in range(iterations):
             # 生成新解 - 深拷贝当前解
             new_solution = {
                 'circle': current_solution['circle'].copy(),
-                'rectangles': [r.copy() for r in current_solution['rectangles']]
+                'shapes': [s.copy() for s in current_solution['shapes']]
             }
 
-            # 随机调整每个矩形
-            for rect in new_solution['rectangles']:
+            # 随机调整每个形状
+            for shape in new_solution['shapes']:
                 # 随机平移
-                rect['x'] += random.uniform(-5, 5)
-                rect['y'] += random.uniform(-5, 5)
-                # 随机旋转
-                rect['angle'] += random.uniform(-0.2, 0.2)
+                shape['x'] += random.uniform(-5, 5)
+                shape['y'] += random.uniform(-5, 5)
+
+                # 如果是矩形，随机旋转
+                if shape['type'] == 'rectangle':
+                    shape['angle'] += random.uniform(-0.2, 0.2)
+
+                # 如果是圆形且不是固定大小的，随机调整半径
+                if shape['type'] == 'circle' and not shape['fixed_size']:
+                    shape['radius'] = max(3, shape['radius'] + random.uniform(-1, 1))
 
             # 调整圆参数
             new_solution['circle'][0] += random.uniform(-3, 3)  # x
@@ -293,7 +351,7 @@ class CATIAV5Controller:
                 if new_fitness < self.evaluate_solution(best_solution):
                     best_solution = {
                         'circle': new_solution['circle'].copy(),
-                        'rectangles': [r.copy() for r in new_solution['rectangles']]
+                        'shapes': [s.copy() for s in new_solution['shapes']]
                     }
 
             # 降低温度
@@ -308,11 +366,19 @@ class CATIAV5Controller:
     def draw_solution(self, solution):
         """绘制解决方案"""
         try:
-            # 绘制矩形
-            for i, rect in enumerate(solution['rectangles']):
-                if not self.draw_rectangle(self.sketch, rect['x'], rect['y'],
-                                           rect['width'], rect['height'], rect['angle']):
-                    raise Exception(f"无法绘制第 {i + 1} 个矩形")
+            # 先重置草图，确保清除所有旧图形
+            if not self.reset_sketch():
+                raise Exception("无法重置草图")
+
+            # 绘制所有形状
+            for i, shape in enumerate(solution['shapes']):
+                if shape['type'] == 'rectangle':
+                    if not self.draw_rectangle(self.sketch, shape['x'], shape['y'],
+                                               shape['width'], shape['height'], shape['angle']):
+                        raise Exception(f"无法绘制第 {i + 1} 个矩形")
+                elif shape['type'] == 'circle':
+                    if not self.draw_circle(self.sketch, shape['x'], shape['y'], shape['radius']):
+                        raise Exception(f"无法绘制第 {i + 1} 个圆形")
 
             # 绘制包围圆
             cx, cy, cr = solution['circle']
@@ -327,24 +393,69 @@ class CATIAV5Controller:
     def reset_sketch(self, plane="xy"):
         """删除当前草图并新建一个新的草图"""
         try:
-            sketches = self.main_body.Sketches
-            sketch_count = sketches.Count
+            # 获取当前活动文档
+            active_doc = self.catia.ActiveDocument
 
-            # 删除当前 sketch（如果存在）
-            if self.sketch:
-                for i in range(1, sketch_count + 1):
-                    item = sketches.Item(i)
-                    if item.Name == self.sketch.Name:
-                        item.Delete()
-                        print(f"已删除旧草图: {self.sketch.Name}")
-                        break
+            # 删除所有现有草图
+            bodies = self.part.Bodies
+            for i in range(1, bodies.Count + 1):
+                body = bodies.Item(i)
+                sketches = body.Sketches
+                for j in range(1, sketches.Count + 1):
+                    try:
+                        sketch = sketches.Item(j)
+                        sketch.Delete()
+                    except:
+                        continue
 
             # 创建新的草图
-            self.sketch = self.create_sketch(plane=plane)
+            origin_elements = self.part.OriginElements
+            plane_obj = {
+                "xy": origin_elements.PlaneXY,
+                "yz": origin_elements.PlaneYZ,
+                "zx": origin_elements.PlaneZX
+            }.get(plane.lower(), origin_elements.PlaneXY)
+
+            sketches = self.main_body.Sketches
+            self.sketch = sketches.Add(plane_obj)
+            self.part.InWorkObject = self.sketch
+            self.part.Update()
+
+            print("草图已重置")
             return True
         except Exception as e:
             print(f"重置草图失败: {e}")
             return False
+
+    def toggle_visibility(self, name, visible=True):
+        """控制图形可见性"""
+        try:
+            for body in self.part.Bodies:
+                for sketch in body.Sketches:
+                    for element in sketch.Elements:
+                        if element.Name == name:
+                            element.Visible = visible
+            self.part.Update()
+            return True
+        except Exception as e:
+            print(f"控制可见性失败: {e}")
+            return False
+
+    def shift_solution_to_target_center(self, solution, target_x, target_y):
+        current_cx, current_cy, _ = solution['circle']
+        dx = target_x - current_cx
+        dy = target_y - current_cy
+
+        # 移动外包圆
+        solution['circle'][0] += dx
+        solution['circle'][1] += dy
+
+        # 移动所有图形
+        for shape in solution['shapes']:
+            shape['x'] += dx
+            shape['y'] += dy
+
+
 
     def run(self):
         """运行主程序"""
@@ -353,23 +464,31 @@ class CATIAV5Controller:
                 return False
 
             # 1. 绘制初始布局
-            self.sketch = self.create_sketch()
             print("\n绘制初始布局...")
-            for rect in self.rectangles:
-                self.draw_rectangle(self.sketch, rect['x'], rect['y'],
-                                    rect['width'], rect['height'], rect['angle'])
+            self.sketch = self.create_sketch()
+            initial_shapes_sketch = self.sketch.Name  # 保存初始草图名称
+
+            for shape in self.shapes:
+                if shape['type'] == 'rectangle':
+                    self.draw_rectangle(self.sketch, shape['x'], shape['y'],
+                                        shape['width'], shape['height'], shape['angle'])
+                elif shape['type'] == 'circle':
+                    self.draw_circle(self.sketch, shape['x'], shape['y'], shape['radius'])
 
             # 2. 优化布局
             input("\n按回车键开始优化布局...")
             print("\n正在优化布局(可能需要几分钟)...")
             self.best_solution = self.simulated_annealing(iterations=2000)
 
-            # 3. 清除初始布局并绘制优化结果
-            self.reset_sketch()
+            self.shift_solution_to_target_center(self.best_solution, -100, -100)
 
+            # 3. 绘制优化结果到新草图
             print("\n绘制优化后的布局...")
             if not self.draw_solution(self.best_solution):
                 return False
+
+            # 可选: 隐藏初始草图
+            self.toggle_visibility(initial_shapes_sketch, visible=False)
 
             # 显示最终结果
             cx, cy, cr = self.best_solution['circle']
@@ -379,12 +498,9 @@ class CATIAV5Controller:
 
             input("\n操作完成！按 Enter 退出...")
             return True
-
         except Exception as e:
             print(f"运行失败: {e}")
             return False
-        finally:
-            self._cleanup()
 
 
 if __name__ == "__main__":
