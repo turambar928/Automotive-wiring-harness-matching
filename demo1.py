@@ -8,6 +8,7 @@ import numpy as np
 
 class CATIAV5Controller:
     def __init__(self):
+        '''
         pythoncom.CoInitialize()
         try:
             self.catia = win32com.client.Dispatch("CATIA.Application")
@@ -27,6 +28,50 @@ class CATIAV5Controller:
             print(f"初始化失败: {e}")
             self._cleanup()
             raise
+        '''
+
+        pythoncom.CoInitialize()
+        try:
+            self.catia = win32com.client.Dispatch("CATIA.Application")
+            self.catia.Visible = True
+            print("=== CATIA V5 自动化绘图 ===")
+            print("CATIA 连接成功")
+
+            # 固定生成三个圆形
+            self.shapes = [
+                {
+                    'type': 'circle',
+                    'x': 100,
+                    'y': 100,
+                    'radius': 10,
+                    'fixed_size': True  # 第一个圆形是固定大小的插头
+                },
+                {
+                    'type': 'circle',
+                    'x': 120,
+                    'y': 100,
+                    'radius': 8,
+                    'fixed_size': False
+                },
+                {
+                    'type': 'circle',
+                    'x': 110,
+                    'y': 115,
+                    'radius': 6,
+                    'fixed_size': False
+                }
+            ]
+
+            self.best_solution = None
+            self.sketch = None
+            self.part = None
+            self.part_doc = None
+            self.main_body = None
+        except Exception as e:
+            print(f"初始化失败: {e}")
+            self._cleanup()
+            raise
+
 
     def generate_non_overlapping_shapes(self, shape_count=5, max_attempts=100):
         """随机生成不重叠的圆形和矩形"""
@@ -267,16 +312,29 @@ class CATIAV5Controller:
         return True  # 所有轴上都重叠
 
     def get_bounding_circle(self, shapes):
-        """根据所有角点计算最小外接圆（近似）：中心为点集中心，半径为最远距离"""
+        """同时考虑矩形角点和圆形外边界来拟合最小包围圆（近似）"""
         all_points = []
-        for shape in shapes:
-            all_points.extend(self.get_shape_corners(shape))
 
-        # 取所有点的中心
+        for shape in shapes:
+            if shape['type'] == 'rectangle':
+                all_points.extend(self.get_shape_corners(shape))
+            elif shape['type'] == 'circle':
+                # 将圆的“外围边界点”加入考虑
+                cx, cy, r = shape['x'], shape['y'], shape['radius']
+                # 这里取4个方向（你也可以用8或更多方向更精细）
+                all_points.append((cx + r, cy))
+                all_points.append((cx - r, cy))
+                all_points.append((cx, cy + r))
+                all_points.append((cx, cy - r))
+
+        if not all_points:
+            return {'x': 0, 'y': 0, 'radius': 0}
+
+        # 求点集中心
         avg_x = sum(p[0] for p in all_points) / len(all_points)
         avg_y = sum(p[1] for p in all_points) / len(all_points)
 
-        # 半径是最远点距离
+        # 半径 = 所有点到中心的最大距离
         max_r = max(math.hypot(p[0] - avg_x, p[1] - avg_y) for p in all_points)
 
         return {'x': avg_x, 'y': avg_y, 'radius': max_r}
