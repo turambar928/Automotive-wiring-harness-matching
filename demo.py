@@ -266,8 +266,23 @@ class CATIAV5Controller:
 
         return True  # 所有轴上都重叠
 
+    def get_bounding_circle(self, shapes):
+        """根据所有角点计算最小外接圆（近似）：中心为点集中心，半径为最远距离"""
+        all_points = []
+        for shape in shapes:
+            all_points.extend(self.get_shape_corners(shape))
+
+        # 取所有点的中心
+        avg_x = sum(p[0] for p in all_points) / len(all_points)
+        avg_y = sum(p[1] for p in all_points) / len(all_points)
+
+        # 半径是最远点距离
+        max_r = max(math.hypot(p[0] - avg_x, p[1] - avg_y) for p in all_points)
+
+        return {'x': avg_x, 'y': avg_y, 'radius': max_r}
+
     def evaluate_solution(self, solution):
-        """评估解决方案的质量"""
+        """评估解决方案的质量 - 改进版"""
         circle_x, circle_y, circle_r = solution['circle']
         shapes = solution['shapes']
 
@@ -278,23 +293,37 @@ class CATIAV5Controller:
                 if self.check_overlap(shapes[i], shapes[j]):
                     overlap_penalty += 1000  # 大惩罚项
 
-        # 检查所有形状是否在圆内
+        # 检查所有形状是否在圆内，并计算紧凑度
         max_distance = 0
+        total_distance = 0
+        shape_areas = []
+
         for shape in shapes:
             corners = self.get_shape_corners(shape)
             for corner_x, corner_y in corners:
                 distance = math.sqrt((corner_x - circle_x) ** 2 + (corner_y - circle_y) ** 2)
                 if distance > max_distance:
                     max_distance = distance
+                total_distance += distance
 
-        # 适应度：圆半径越小越好 + 重叠惩罚
+            # 计算形状面积用于权重
+            if shape['type'] == 'rectangle':
+                shape_areas.append(shape['width'] * shape['height'])
+            else:
+                shape_areas.append(math.pi * shape['radius'] ** 2)
+
+        # 计算紧凑度指标 (考虑形状面积权重)
+        avg_distance = total_distance / (len(shapes) * 4)  # 每个形状4个角点
+        compactness = sum(area * avg_distance for area in shape_areas) / sum(shape_areas)
+
+        # 适应度：圆半径 + 紧凑度 + 重叠惩罚
         if max_distance <= circle_r:
-            return circle_r + overlap_penalty  # 越小越好
+            return circle_r + 0.5 * compactness + overlap_penalty  # 权重可调
         else:
             return float('inf')  # 无效解
 
     def simulated_annealing(self, iterations=1000, temp=1000, cooling_rate=0.99):
-        """模拟退火优化形状位置和包围圆"""
+        """模拟退火优化形状位置和包围圆 - 改进版"""
         # 初始化当前解
         current_solution = {
             'circle': [100, 100, 50],  # 初始圆参数[x, y, radius]
@@ -306,8 +335,14 @@ class CATIAV5Controller:
             'circle': current_solution['circle'].copy(),
             'shapes': [s.copy() for s in current_solution['shapes']]
         }
+        best_fitness = self.evaluate_solution(best_solution)
 
         for i in range(iterations):
+            # 动态调整移动步长(随着温度降低而减小)
+            move_step = max(1, 5 * temp / 1000)
+            rotate_step = max(0.05, 0.2 * temp / 1000)
+            radius_step = max(0.1, 1 * temp / 1000)
+
             # 生成新解 - 深拷贝当前解
             new_solution = {
                 'circle': current_solution['circle'].copy(),
@@ -316,22 +351,30 @@ class CATIAV5Controller:
 
             # 随机调整每个形状
             for shape in new_solution['shapes']:
-                # 随机平移
-                shape['x'] += random.uniform(-5, 5)
-                shape['y'] += random.uniform(-5, 5)
+                # 随机平移(步长随温度降低)
+                shape['x'] += random.uniform(-move_step, move_step)
+                shape['y'] += random.uniform(-move_step, move_step)
 
                 # 如果是矩形，随机旋转
                 if shape['type'] == 'rectangle':
-                    shape['angle'] += random.uniform(-0.2, 0.2)
+                    shape['angle'] += random.uniform(-rotate_step, rotate_step)
 
+                '''
                 # 如果是圆形且不是固定大小的，随机调整半径
                 if shape['type'] == 'circle' and not shape['fixed_size']:
-                    shape['radius'] = max(3, shape['radius'] + random.uniform(-1, 1))
+                    shape['radius'] = max(3, shape['radius'] + random.uniform(-radius_step, radius_step))
+                '''
 
-            # 调整圆参数
-            new_solution['circle'][0] += random.uniform(-3, 3)  # x
-            new_solution['circle'][1] += random.uniform(-3, 3)  # y
-            new_solution['circle'][2] = max(10, new_solution['circle'][2] + random.uniform(-2, 2))  # 半径
+            # 调整圆参数(动态步长)
+            '''
+            new_solution['circle'][0] += random.uniform(-move_step, move_step)  # x
+            new_solution['circle'][1] += random.uniform(-move_step, move_step)  # y
+            new_solution['circle'][2] = max(10, new_solution['circle'][2] + random.uniform(-radius_step, radius_step))  # 半径
+            '''
+
+            # 自动拟合当前图形的最小外包圆
+            bounding = self.get_bounding_circle(new_solution['shapes'])
+            new_solution['circle'] = [bounding['x'], bounding['y'], bounding['radius']]
 
             # 计算适应度
             current_fitness = self.evaluate_solution(current_solution)
@@ -347,19 +390,22 @@ class CATIAV5Controller:
 
             if accept:
                 current_solution = new_solution
+                current_fitness = new_fitness
 
-                if new_fitness < self.evaluate_solution(best_solution):
+                if new_fitness < best_fitness:
                     best_solution = {
                         'circle': new_solution['circle'].copy(),
                         'shapes': [s.copy() for s in new_solution['shapes']]
                     }
+                    best_fitness = new_fitness
 
             # 降低温度
             temp *= cooling_rate
 
             # 打印进度
             if i % 100 == 0:
-                print(f"Iteration {i}: Temp={temp:.2f}, Best Radius={best_solution['circle'][2]:.2f}")
+                print(
+                    f"Iteration {i}: Temp={temp:.2f}, Best Radius={best_solution['circle'][2]:.2f}, Fitness={best_fitness:.2f}")
 
         return best_solution
 
